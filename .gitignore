@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.zip
+*.log
+*.txt
+debug_server.py
+server_run.log
+server_err.log
+srv.log
+debug.log
