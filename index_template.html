@@ -147,6 +147,19 @@
 
     /* ── Main ───────────────────────────────────────────────────── */
     main { padding: 28px 32px; max-width: 1600px; margin: 0 auto; }
+    #state-loading {
+      display: flex; flex-direction: column; align-items: center;
+      justify-content: center; gap: 16px; padding: 80px 20px; color: var(--text-secondary);
+    }
+    .spinner {
+      width: 36px; height: 36px;
+      border: 3px solid var(--border);
+      border-top-color: var(--nv-green);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    body.staging .spinner { border-top-color: var(--staging-color); }
+    @keyframes spin { to { transform: rotate(360deg); } }
     #state-empty {
       display: none; flex-direction: column; align-items: center;
       justify-content: center; gap: 16px; padding: 80px 20px; color: var(--text-secondary);
@@ -308,6 +321,10 @@
 </div>
 
 <main>
+  <div id="state-loading">
+    <div class="spinner"></div>
+    <div>Scanning S3 for assets…</div>
+  </div>
   <div id="state-empty">
     <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
       <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
@@ -321,14 +338,34 @@
 <div id="toast"></div>
 
 <script>
-const DATASETS = {
-  production: /*PRODUCTION_DATA*/,
-  staging:    /*STAGING_DATA*/
-};
+const DATASETS = { production: [], staging: [] };
+const COUNTS   = { production: 0,  staging: 0  };
 
-const COUNTS = { production: PRODUCTION_COUNT, staging: STAGING_COUNT };
+let currentEnv    = 'production';
+let _assetsLoaded = false;
 
-let currentEnv = 'production';
+function loadAssets() {
+  // Fetch from the local server's /assets endpoint.
+  // The server fetches from S3 server-side (no CORS restrictions), so this always works.
+  fetch('/assets')
+    .then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+    .then(function(data) {
+      DATASETS.production = data.production || [];
+      DATASETS.staging    = data.staging    || [];
+      COUNTS.production   = DATASETS.production.length;
+      COUNTS.staging      = DATASETS.staging.length;
+      _assetsLoaded = true;
+      document.getElementById('state-loading').style.display = 'none';
+      document.getElementById('badge-count').textContent = COUNTS[currentEnv];
+      filterAndRender();
+    })
+    .catch(function(err) {
+      document.getElementById('state-loading').style.display = 'none';
+      document.getElementById('results-info').innerHTML =
+        '<span style="color:#e05050">⚠ Could not load assets: ' + err.message + '</span>';
+      console.error('loadAssets error:', err);
+    });
+}
 
 // ── Toast notification ───────────────────────────────────────────────
 function showToast(html, duration) {
@@ -458,7 +495,7 @@ function setEnv(env) {
   document.body.classList.toggle('staging', env === 'staging');
   document.getElementById('btn-prod').className    = 'env-btn' + (env === 'production' ? ' active-prod'    : '');
   document.getElementById('btn-staging').className = 'env-btn' + (env === 'staging'    ? ' active-staging' : '');
-  document.getElementById('badge-count').textContent = COUNTS[env];
+  document.getElementById('badge-count').textContent = _assetsLoaded ? COUNTS[env] : '…';
   filterAndRender();
 }
 
@@ -560,6 +597,7 @@ function renderCard(a) {
 }
 
 function filterAndRender() {
+  if (!_assetsLoaded) return;
   var query = document.getElementById('search').value.trim().toLowerCase();
   var catF  = document.getElementById('filter-category').value;
   var terms = query.split(/\s+/).filter(Boolean);
@@ -606,6 +644,7 @@ document.getElementById('btn-clear').addEventListener('click', function() {
 
 // Init
 setEnv('production');
+loadAssets();
 document.getElementById('search').focus();
 </script>
 </body>

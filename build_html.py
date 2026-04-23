@@ -1,8 +1,15 @@
 """
-build_html.py — Generates index.html with both production and staging asset data baked in.
+build_html.py — Generates a self-contained index.html with both production and
+staging asset data baked in (for offline / standalone use).
+
+For the live server workflow, run launch.py instead — it fetches fresh data
+from S3 on every launch via the /assets endpoint, so counts are never stale.
+
 Usage: python3 build_html.py
 """
 import json, urllib.request, os
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 ENVS = {
     'production': 'omniverse-content-production',
@@ -51,8 +58,8 @@ for env, bucket in ENVS.items():
     print(f'\n[{env.upper()}]')
     data[env] = fetch_assets(bucket)
 
-template_path = 'C:/AIProjects/AssetSearchSkills/index_template.html'
-out_path      = 'C:/AIProjects/AssetSearchSkills/index.html'
+template_path = os.path.join(SCRIPT_DIR, 'index_template.html')
+out_path      = os.path.join(SCRIPT_DIR, 'index.html')
 
 html = open(template_path, encoding='utf-8').read()
 html = html.replace('/*PRODUCTION_DATA*/', json.dumps(data['production'], separators=(',', ':')))

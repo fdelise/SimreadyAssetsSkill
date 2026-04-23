@@ -2,6 +2,7 @@
 """
 SimReady Asset Browser - local server
 Serves index.html and zips asset folders from S3 on demand.
+Fetches live asset data from both S3 buckets on startup — no hardcoded counts.
 
 Usage:
     python3 server.py
@@ -11,11 +12,13 @@ import http.server
 import socketserver
 import urllib.request
 import urllib.parse
+import urllib.error
 import zipfile
 import io
 import re
 import os
 import sys
+import json
 import threading
 
 PORT = 8081
@@ -23,6 +26,98 @@ DIR  = os.path.dirname(os.path.abspath(__file__))
 
 SKIP_PREFIXES = ('.thumbs/', 'textures/.thumbs/')
 SKIP_SUFFIXES = ('.wrapp',)
+
+ENVS = {
+    'production': 'omniverse-content-production',
+    'staging':    'omniverse-content-staging',
+}
+
+# In-memory asset cache populated at startup by init_assets()
+_asset_cache      = {}
+_asset_cache_lock = threading.Lock()
+
+
+def fetch_assets(bucket_name):
+    """Fetch and parse workspace_cache.json from an S3 bucket. Returns list of asset dicts."""
+    base_url  = 'https://' + bucket_name + '.s3.amazonaws.com/Assets/Isaac/6.0/Isaac/'
+    cache_url = base_url + 'SimReady/workspace_cache.json'
+    sys.stderr.write('  Fetching ' + cache_url + ' ...\n')
+    sys.stderr.flush()
+    with urllib.request.urlopen(cache_url, timeout=30) as r:
+        cache = json.load(r)
+
+    assets = []
+    for usd_path, versions in cache.items():
+        inner         = versions.get('null') or next(iter(versions.values()), {})
+        install_paths = inner.get('install_path_options') or []
+        segs      = usd_path.split('/')
+        usd_file  = segs[-1]
+        folder    = '/'.join(segs[:-1])
+        usd_stem  = usd_file[:-4]
+        name      = segs[-2].replace('_', ' ') if len(segs) >= 2 else usd_file
+        top_cat   = segs[1] if len(segs) > 1 else ''
+        category  = ' > '.join(segs[1:-1])
+        s3_prefix = 'Assets/Isaac/6.0/Isaac/' + folder + '/'
+
+        assets.append({
+            'name':     name,
+            'topCat':   top_cat,
+            'category': category,
+            'usdFile':  usd_file,
+            'usdUrl':   base_url + usd_path,
+            'thumbUrl': base_url + folder + '/.thumbs/' + usd_stem + '_thumbnail.png',
+            's3Uri':    's3://' + bucket_name + '/Assets/Isaac/6.0/Isaac/' + usd_path,
+            'bucket':   bucket_name,
+            'prefix':   s3_prefix,
+            'search':   (usd_path + ' ' + ' '.join(install_paths)).lower().replace('_', ' '),
+        })
+
+    sys.stderr.write('  Parsed ' + str(len(assets)) + ' assets\n')
+    sys.stderr.flush()
+    return assets
+
+
+def probe_thumbnail(asset):
+    """HEAD-request a thumbnail URL and return the HTTP status (or error string)."""
+    try:
+        req = urllib.request.Request(asset['thumbUrl'], method='HEAD')
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status
+    except urllib.error.HTTPError as e:
+        return e.code
+    except Exception as e:
+        return str(e)
+
+
+def init_assets():
+    """Fetch asset data from both S3 buckets and populate the in-memory cache.
+    Called once at startup — always reflects the current state of S3.
+    """
+    global _asset_cache
+    data = {}
+    for env, bucket in ENVS.items():
+        sys.stderr.write('\n[' + env.upper() + ']\n')
+        sys.stderr.flush()
+        try:
+            data[env] = fetch_assets(bucket)
+        except Exception as exc:
+            sys.stderr.write('  ERROR fetching ' + env + ': ' + str(exc) + '\n')
+            sys.stderr.flush()
+            data[env] = []
+
+        # Probe a sample thumbnail to verify the URL pattern
+        if data[env]:
+            sample = data[env][0]
+            status = probe_thumbnail(sample)
+            ok = 'OK' if status == 200 else 'FAIL (' + str(status) + ')'
+            sys.stderr.write('  Thumbnail check [' + ok + ']: ' + sample['thumbUrl'] + '\n')
+            sys.stderr.flush()
+
+    with _asset_cache_lock:
+        _asset_cache = data
+    total = sum(len(v) for v in data.values())
+    sys.stderr.write('\nAsset scan complete — ' + str(total) + ' total assets loaded.\n\n')
+    sys.stderr.flush()
 
 
 def s3_list(bucket, prefix):
@@ -93,6 +188,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_header('Content-Type', 'text/plain')
                 self.end_headers()
                 self.wfile.write(b'ok')
+                return
+
+            # Live asset data endpoint — always returns whatever is in the in-memory cache
+            # (populated at startup from S3; never hardcoded)
+            if parsed.path == '/assets':
+                with _asset_cache_lock:
+                    payload = json.dumps(_asset_cache, separators=(',', ':')).encode('utf-8')
+                self.send_response(200)
+                self.send_cors()
+                self.send_header('Content-Type', 'application/json; charset=utf-8')
+                self.send_header('Content-Length', str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
                 return
 
             if parsed.path == '/zip':
